@@ -233,6 +233,8 @@ inteProObj <- AddMetaData(inteProObj,metadata = use_df)
 inteProObj$celltype <- factor(inteProObj$celltype, levels = c("Classical monocyte-C1","Classical monocyte-C2","Classical monocyte-C3",
                                                               "Non-classical monocyte","M-MDSC","cDC","mDC","pDC","HSC","Plasma cell"))
 
+saveRDS(inteProObj,file = "LCCHEMOICBPBMC_4_SINGLET_221202_cluster_230110_Seurat_Objects_Clustered_CD33_subtype_anno.RDS")
+
 MDSC_Obj <- subset(inteProObj,subset = celltype%in%c("M-MDSC"))
 saveRDS(MDSC_Obj,file = "LCCHEMOICBPBMC_12_SINGLET_cluster_230110_MDSC.rds")
 
@@ -392,3 +394,107 @@ dotGG
 ggsave(plot = dotGG, filename = paste0(tmp_pf,"Major_integrated_Ab_coLR_ALL_251124.png"),dpi = 600, width = 9, heigh = 3.5,units = "in")
 ggsave(plot = dotGG, filename = paste0(tmp_pf,"Major_integrated_Ab_coLR_ALL_251124.pdf"),width = 9, heigh = 3.5)
 
+###### stage IV PBMC HSC/MDSC/cMono/ncMono Monocle ######
+rm(list = ls())
+suppressMessages(library(ggsci))
+suppressMessages(library(Seurat))
+suppressMessages(library(ggplot2))
+suppressMessages(library(ggpubr))
+suppressMessages(library(clustree))
+suppressMessages(library(cowplot))
+suppressMessages(library(patchwork))
+suppressMessages(library(dplyr))
+suppressMessages(library(monocle))
+packageVersion("monocle")
+set.seed(1)
+
+outpfil = "Monocle_1018/HSC_MDSC_cMo_ncMo/"
+filna = "LCCHEMOICBPBMC_12_SINGLET_cluster_230110_"
+tmp_pf <- paste0(outpfil,filna)
+
+inteProObj_clu10 <- readRDS("LCCHEMOICBPBMC_4_SINGLET_221202_cluster_230110_Seurat_Objects_Clustered_CD33_subtype_anno.RDS")
+inteProObj_clu10$celltype2 <- as.character(inteProObj_clu10$celltype)
+inteProObj_clu10 <- subset(inteProObj_clu10,subset = celltype2%in%c("Classical monocyte-C1","Classical monocyte-C2","Classical monocyte-C3",
+                                                                    "Non-classical monocyte","M-MDSC","HSC"))
+inteProObj_clu10$celltype2 <- ifelse(inteProObj_clu10$celltype2%in%c("M-MDSC"),"M-MDSC",
+                                     ifelse(inteProObj_clu10$celltype2%in%c("HSC"),"HSC",
+                                            ifelse(inteProObj_clu10$celltype2%in%c("Non-classical monocyte"),"ncMo","cMo")))
+Idents(inteProObj_clu10) <- inteProObj_clu10$celltype2
+
+####subset Random cell of each cell type#####
+#If the number of a certain cell subset exceeds 2000 cells, then 2000 cells will be taken; otherwise, all the cells will be selected.
+allCells = names(Idents(inteProObj_clu10))
+allType = levels(Idents(inteProObj_clu10))
+
+choose_Cells = unlist(lapply(allType, function(x) {
+  cgCells = allCells[Idents(inteProObj_clu10) == x]
+  if (length(cgCells) >= 2000) {
+    cg = sample(cgCells, 2000)  
+  } else {
+    cg = cgCells  
+  }
+  cg
+}))
+
+inteProObj_cg = inteProObj_clu10[, allCells %in% choose_Cells]
+table(inteProObj_cg$celltype2)
+
+raw <- inteProObj_cg
+meta <- raw@meta.data
+exp <- as.data.frame(raw@assays$RNA@counts)
+exp_matrix <- as.matrix(exp)
+genes <- data.frame(gene_short_name = rownames(inteProObj_cg@assays$RNA),row.names = rownames(inteProObj_cg@assays$RNA))
+
+
+pd <- new('AnnotatedDataFrame', data = meta) 
+fd <- new('AnnotatedDataFrame', data = genes)
+cds <- newCellDataSet(exp_matrix,
+                      phenoData = pd,
+                      featureData = fd,
+                      lowerDetectionLimit = 0.5,
+                      expressionFamily = negbinomial.size())
+cds <- estimateSizeFactors(cds)
+cds <- estimateDispersions(cds)
+colnames(pData(cds))[colnames(pData(cds)) == "sample_name"] <- "sid"
+
+expressed_genes <- VariableFeatures(raw) 
+diff <- differentialGeneTest(cds[expressed_genes,],fullModelFormulaStr="~celltype2",cores=5) 
+head(diff)
+write.csv(diff,file = paste0(tmp_pf,"cell_type_diff_random2000.csv"),row.names = TRUE)
+deg <- subset(diff, qval < 0.01) 
+deg <- deg[order(deg$qval,decreasing=F),]
+head(deg)
+write.csv(deg,file = paste0(tmp_pf,"train_monocle_deg_random2000.csv"),row.names = TRUE)
+#deg <- read.csv(file = paste0(tmp_pf,"train_monocle_deg.csv"),row.names = 1)
+
+ordergene <- rownames(deg) 
+cds <- setOrderingFilter(cds, ordergene)  
+orderGG = plot_ordering_genes(cds)
+ggsave(filename = paste0(tmp_pf,"train.ordergenes_random2000.png"),plot = orderGG,dpi = 600,width = 8,height = 6,units = "in")
+ordergene <- row.names(deg)[order(deg$qval)][1:1000]
+cds <- reduceDimension(cds, max_components = 2,method = 'DDRTree')
+cds <- orderCells(cds)
+
+#set root
+GM_state <- function(cds){
+  if (length(unique(pData(cds)$State)) > 1){
+    T0_counts <- table(pData(cds)$State, pData(cds)$celltype2)[,"HSC"]
+    return(as.numeric(names(T0_counts)[which
+                                       (T0_counts == max(T0_counts))]))
+  } else {
+    return (1)
+  }
+}
+cds <- orderCells(cds, root_state = GM_state(cds))
+saveRDS(object = cds,file = paste0(tmp_pf,"mnc2_random2000.RDS"))
+
+###Fig.1E##############
+cds <- readRDS(file = paste0(tmp_pf,"mnc2_random2000.RDS"))
+df <- pData(cds) 
+densGG = ggplot(df, aes(Pseudotime, colour = celltype2, fill = celltype2)) + 
+  geom_density(bw=0.5,size=1,alpha = 0.5)+
+  theme_classic2()+
+  scale_color_manual(values = c("#76b0d6","#B383B9","#DC143C","#08519c"))+
+  scale_fill_manual(values = c("#76b0d6","#B383B9","#DC143C","#08519c"))
+ggsave(paste(tmp_pf, "mnc2_trajectory_density.png", sep = ""), dpi = 300, width = 6, height = 4)
+ggsave(paste(tmp_pf, "mnc2_trajectory_density.pdf", sep = ""), width = 6, height = 4)
